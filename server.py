@@ -12,8 +12,9 @@ Transports
 
 Configuration (environment variables / .env) — see .env.example
   NEON_DATABASE_URL  (required) Neon connection string
-  MCP_API_KEY        (optional) if set, every /mcp request must send it as
-                     `Authorization: Bearer <key>` or `?api_key=<key>`
+  SERVER_PASSWORD    (required for HTTP) shared password. Claude Desktop shows a
+                     login page; other clients may send `Authorization: Bearer <password>`
+  PUBLIC_URL         (optional) public base URL; auto-detected on Render
   MCP_TRANSPORT      stdio | http   (default: http when PORT is set, else stdio)
   PORT / HOST        HTTP bind (Render sets PORT automatically)
 
@@ -31,7 +32,6 @@ import re
 import sys
 import time
 import uuid
-import hmac
 import logging
 from contextlib import contextmanager
 from datetime import date
@@ -90,16 +90,67 @@ DATABASE_URL = _clean_db_url(_raw_url)
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 TRANSPORT = os.environ.get("MCP_TRANSPORT", "http" if os.environ.get("PORT") else "stdio").lower()
-API_KEY = os.environ.get("MCP_API_KEY", "").strip()
+IS_HTTP = TRANSPORT in ("http", "streamable-http", "streamable_http")
+SERVER_PASSWORD = os.environ.get("SERVER_PASSWORD", "").strip()
+PUBLIC_URL = (
+    os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or f"http://localhost:{PORT}"
+).rstrip("/")
 
-app = FastMCP(
-    "nddb-hr-portal",
+_fastmcp_kwargs = dict(
     instructions="HR self-service for NDDB: register employees, check leave balances, apply for leave, list employees.",
     host=HOST,
     port=PORT,
     stateless_http=True,  # no sticky sessions needed; survives Render restarts
     json_response=True,
 )
+
+auth_provider = None
+if IS_HTTP:
+    if not SERVER_PASSWORD:
+        log.error("SERVER_PASSWORD is not set. Refusing to start the HTTP server without authentication.")
+        sys.exit(1)
+    if len(SERVER_PASSWORD) < 8:
+        log.warning("SERVER_PASSWORD is shorter than 8 characters — use a stronger password.")
+
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+    from auth_provider import PasswordOAuthProvider
+
+    class _PgClientStore:
+        """Persists OAuth client registrations in Postgres so Claude stays
+        connected across Render restarts. Falls back to memory if the DB fails."""
+
+        def get(self, client_id):
+            try:
+                with db_cursor() as cur:
+                    cur.execute("SELECT info FROM mcp_oauth_clients WHERE client_id = %s", (client_id,))
+                    row = cur.fetchone()
+                    return row[0] if row else None
+            except Exception as e:
+                log.warning("OAuth client lookup failed: %s", e)
+                return None
+
+        def save(self, client_id, info_json):
+            try:
+                with db_cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO mcp_oauth_clients (client_id, info) VALUES (%s, %s)
+                           ON CONFLICT (client_id) DO UPDATE SET info = EXCLUDED.info""",
+                        (client_id, info_json),
+                    )
+            except Exception as e:
+                log.warning("OAuth client not persisted (kept in memory): %s", e)
+
+    auth_provider = PasswordOAuthProvider(SERVER_PASSWORD, PUBLIC_URL, client_store=_PgClientStore())
+    _fastmcp_kwargs.update(
+        auth_server_provider=auth_provider,
+        auth=AuthSettings(
+            issuer_url=PUBLIC_URL,
+            resource_server_url=f"{PUBLIC_URL}/mcp",
+            client_registration_options=ClientRegistrationOptions(enabled=True, default_scopes=["mcp"]),
+        ),
+    )
+
+app = FastMCP("nddb-hr-portal", **_fastmcp_kwargs)
 
 # =============================================================================
 # DATABASE HELPERS
@@ -200,6 +251,11 @@ CREATE TABLE IF NOT EXISTS agent_audit_logs (
     details          TEXT,
     status           VARCHAR(20),
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+    client_id  VARCHAR(100) PRIMARY KEY,
+    info       TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -519,15 +575,14 @@ def list_all_employees() -> str:
 
 
 # =============================================================================
-# HTTP APP (Render) — health check + optional API-key protection
+# HTTP APP (Render) — health check + password login page
 # =============================================================================
 
 
 def build_http_app():
-    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse, PlainTextResponse
 
-    http_app = app.streamable_http_app()
+    http_app = app.streamable_http_app()  # includes OAuth endpoints + auth on /mcp
 
     async def health(request):
         return JSONResponse({"status": "ok", "server": "nddb-hr-portal", "mcp_endpoint": "/mcp"})
@@ -537,24 +592,8 @@ def build_http_app():
 
     http_app.add_route("/health", health, methods=["GET", "HEAD"])
     http_app.add_route("/", root, methods=["GET", "HEAD"])
-
-    if API_KEY:
-
-        class ApiKeyMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                if request.url.path.startswith("/mcp"):
-                    auth = request.headers.get("authorization", "")
-                    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-                    supplied = supplied or request.query_params.get("api_key", "")
-                    if not hmac.compare_digest(supplied, API_KEY):
-                        return JSONResponse({"error": "unauthorized"}, status_code=401)
-                return await call_next(request)
-
-        http_app.add_middleware(ApiKeyMiddleware)
-        log.info("API key protection enabled for /mcp")
-    else:
-        log.warning("MCP_API_KEY not set — /mcp is publicly accessible.")
-
+    http_app.add_route("/login", auth_provider.login_page, methods=["GET", "POST"])
+    log.info("Password authentication enabled. Public URL: %s", PUBLIC_URL)
     return http_app
 
 
@@ -563,7 +602,7 @@ def build_http_app():
 # =============================================================================
 if __name__ == "__main__":
     ensure_schema()
-    if TRANSPORT in ("http", "streamable-http", "streamable_http"):
+    if IS_HTTP:
         import uvicorn
 
         log.info("Starting NDDB HR Portal MCP server (HTTP) on %s:%d — endpoint /mcp", HOST, PORT)
