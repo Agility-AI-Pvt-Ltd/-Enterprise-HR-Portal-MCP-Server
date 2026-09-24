@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nddb-hr-portal-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: MCP_TRANSPORT
+        value: http
+      - key: NEON_DATABASE_URL
+        sync: false
+      - key: SERVER_PASSWORD
+        sync: false
