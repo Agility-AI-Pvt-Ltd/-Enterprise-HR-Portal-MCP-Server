@@ -21,7 +21,7 @@ try:
 except ImportError:
     pass
 
-EXPECTED_HOST = "ep-wandering-water-b52fnnnb-pooler.c-7.us-east-2.aws.neon.tech"
+EXPECTED_HOST = "ep-damp-pine-b49lmb9s-pooler.c-6.us-east-2.aws.neon.tech"
 EXPECTED_DB = "neondb"
 TABLES = (
     "employees",
