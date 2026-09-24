@@ -30,6 +30,8 @@ On first start, missing tables are created automatically. Existing tables are le
 
 The MCP endpoint is `https://<service>.onrender.com/mcp`.
 
+Also set `PUBLIC_URL` to the service's public address (for example `https://your-service.onrender.com`). The login flow hands this URL to the client, so it has to be the real address.
+
 > On Render's free plan, the service sleeps after 15 minutes without traffic, so the first call after a break can take about 30–60 s. Neon also suspends its compute when idle. The server retries the database connection to cover both.
 
 ## Connect Claude Desktop
@@ -72,3 +74,5 @@ Authorization: Bearer <SERVER_PASSWORD>
 | `PUBLIC_URL` | no | The public base URL used in the OAuth login flow. On Render it's detected automatically from `RENDER_EXTERNAL_URL` |
 | `MCP_TRANSPORT` | no | `stdio` or `http`. Defaults to `http` when `PORT` is set |
 | `PORT` / `HOST` | no | Render sets `PORT` for you |
+| `MCP_STATELESS` | no | `1` turns off MCP sessions. Leave unset — Claude connectors need sessions |
+| `MCP_JSON_RESPONSE` | no | `1` returns plain JSON instead of an SSE stream. Leave unset for Claude |

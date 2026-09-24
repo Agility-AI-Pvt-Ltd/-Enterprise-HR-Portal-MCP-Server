@@ -100,8 +100,11 @@ _fastmcp_kwargs = dict(
     instructions="HR self-service for NDDB: register employees, check leave balances, apply for leave, list employees.",
     host=HOST,
     port=PORT,
-    stateless_http=True,  # no sticky sessions needed; survives Render restarts
-    json_response=True,
+    # Default transport settings: session-based with SSE streaming. This is what
+    # claude.ai / Claude Desktop custom connectors expect. Override only if a
+    # specific client needs plain JSON responses or stateless operation.
+    stateless_http=os.environ.get("MCP_STATELESS", "").lower() in ("1", "true", "yes"),
+    json_response=os.environ.get("MCP_JSON_RESPONSE", "").lower() in ("1", "true", "yes"),
 )
 
 auth_provider = None
